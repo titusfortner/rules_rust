@@ -1,0 +1,54 @@
+name: Assembler prefix-map probe
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/assembler_prefix_map_probe.yaml
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            gccs: gcc-9 gcc-10 gcc-11 gcc-12
+          - os: ubuntu-24.04
+            gccs: gcc-12 gcc-13 gcc-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install gcc versions
+        run: |
+          sudo apt-get update -qq
+          for g in ${{ matrix.gccs }}; do sudo apt-get install -y -qq "$g" || true; done
+
+      - name: Measure
+        shell: bash
+        run: |
+          set -u
+          dir="$(mktemp -d)"
+          printf '\t.text\n\t.globl foo\nfoo:\n\tret\n' > "$dir/foo.S"
+
+          # What the driver actually hands to `as` (independent of the object).
+          spec() {
+            "$1" -g "$2" -c "$dir/foo.S" -o "$dir/foo.o" -### 2>&1 \
+              | { grep -o -- '--debug-prefix-map[^"]*' || true; } | head -1
+          }
+          # What ends up in the object.
+          obj() {
+            "$1" -g "$2" -c "$dir/foo.S" -o "$dir/foo.o" 2>/dev/null || { echo "FAIL"; return; }
+            grep -a -c -- "$dir" "$dir/foo.o" || true
+          }
+
+          for cc in ${{ matrix.gccs }}; do
+            command -v "$cc" >/dev/null || continue
+            echo "=================================================================="
+            "$cc" --version | head -1
+            for flag in "-ffile-prefix-map=$dir=." "-fdebug-prefix-map=$dir=."; do
+              s="$(spec "$cc" "$flag")"
+              printf '  %-22s  as gets: %-28s  obj hits: %s\n' \
+                "${flag%%=*}" "${s:-<nothing>}" "$(obj "$cc" "$flag")"
+            done
+          done
+          echo "=================================================================="
+          echo "'as gets: <nothing>' means the driver did NOT forward it to the assembler."
